@@ -743,6 +743,8 @@ class Orchestrator:
         *,
         cursor: int = 0,
         limit: int = 20,
+        interaction_offset: int = 0,
+        interaction_limit: int = 20,
     ) -> dict[str, Any]:
         task = self._owned(env_name, task_id, actor)
         if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
@@ -753,6 +755,18 @@ class Orchestrator:
             or not 1 <= limit <= MAX_EVENT_PAGE
         ):
             raise ValueError(f"limit must be between 1 and {MAX_EVENT_PAGE}")
+        if (
+            isinstance(interaction_offset, bool)
+            or not isinstance(interaction_offset, int)
+            or interaction_offset < 0
+        ):
+            raise ValueError("interaction_offset must be a non-negative integer")
+        if (
+            isinstance(interaction_limit, bool)
+            or not isinstance(interaction_limit, int)
+            or not 1 <= interaction_limit <= 20
+        ):
+            raise ValueError("interaction_limit must be between 1 and 20")
         result = self._parse_json_value(task["result"])
         error = self._parse_json_value(task["error"])
         view = {
@@ -785,17 +799,37 @@ class Orchestrator:
             "WHERE task_id=? AND state='pending' ORDER BY rowid",
             (task_id,),
         ).fetchall()
-        view["interactions"] = [
-            {
+        view["interactions"] = []
+        end = interaction_offset + interaction_limit
+        for row in pending[interaction_offset:end]:
+            native = json.loads(row["params"])
+            item = {
                 "id": row["id"],
                 "method": row["method"],
-                "params": self._bounded_value(json.loads(row["params"]), 2048),
+                "params": self._bounded_value(native, 2048),
             }
-            for row in pending[:20]
-        ]
-        if len(pending) > 20:
+            if isinstance(native.get("availableDecisions"), list):
+                supported = {"accept", "decline", "cancel"}
+                if row["method"] == "item/commandExecution/requestApproval":
+                    supported.add("acceptForSession")
+                item["availableDecisions"] = list(
+                    dict.fromkeys(
+                        value
+                        for value in native["availableDecisions"]
+                        if isinstance(value, str) and value in supported
+                    )
+                )
+            view["interactions"].append(item)
+        more = len(pending) > end
+        view["interactionsPage"] = {
+            "offset": interaction_offset,
+            "nextOffset": end if more else None,
+            "hasMore": more,
+            "total": len(pending),
+        }
+        if more:
             view["interactionsTruncated"] = True
-            view["interactionsOmitted"] = len(pending) - 20
+            view["interactionsOmitted"] = len(pending) - end
         return view
 
     @staticmethod
@@ -816,6 +850,7 @@ class Orchestrator:
         *,
         cursor: int = 0,
         limit: int = 20,
+        interaction_offset: int = 0,
     ) -> dict[str, Any]:
         self._owned(env_name, task_id, actor)
         if (
@@ -841,7 +876,14 @@ class Orchestrator:
                     break
             else:
                 await asyncio.sleep(min(0.05, remaining))
-        return self.task_view(env_name, task_id, actor, cursor=cursor, limit=limit)
+        return self.task_view(
+            env_name,
+            task_id,
+            actor,
+            cursor=cursor,
+            limit=limit,
+            interaction_offset=interaction_offset,
+        )
 
     def sessions(self, env_name: str, actor: Actor) -> list[dict[str, Any]]:
         self._check(env_name, actor)

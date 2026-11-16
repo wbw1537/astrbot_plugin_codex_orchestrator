@@ -4,21 +4,35 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from typing import Any
 
 try:  # package-relative loading is AstrBot's normal data.plugins.<name>.main mode
+    from .codex_orchestrator.chat import command_response, task_response
     from .codex_orchestrator.service import Actor, Environment, Orchestrator
     from .codex_orchestrator.store import Store
+    from .codex_orchestrator.tool_schemas import tool_definitions
     from .codex_orchestrator.transport import connect_stdio, connect_websocket
 except ImportError:  # direct module mode for standalone tests
+    from codex_orchestrator.chat import command_response, task_response
     from codex_orchestrator.service import Actor, Environment, Orchestrator
     from codex_orchestrator.store import Store
+    from codex_orchestrator.tool_schemas import tool_definitions
     from codex_orchestrator.transport import connect_stdio, connect_websocket
 
 try:
+    from astrbot.api import FunctionTool
     from astrbot.api.event import AstrMessageEvent, filter
     from astrbot.api.star import Context, Star, register
 except ImportError:  # allows metadata and core tests without AstrBot
+
+    @dataclass
+    class FunctionTool:
+        name: str
+        description: str
+        parameters: dict
+        handler: Any = None
+        handler_module_path: str | None = None
 
     class Context:
         pass
@@ -35,17 +49,24 @@ except ImportError:  # allows metadata and core tests without AstrBot
         def command(_name: str):
             return lambda fn: fn
 
-        @staticmethod
-        def llm_tool(*, name: str):
-            return lambda fn: fn
-
     filter = _Filter()
 
     def register(*_args: Any, **_kwargs: Any):
         return lambda cls: cls
 
 
-@register("astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", "0.1.0")
+class _CodexTool(FunctionTool):
+    """Public FunctionTool override; framework context remains the actor authority."""
+
+    def __init__(self, *, callback, **schema):
+        super().__init__(**schema)
+        self._callback = callback
+
+    async def call(self, context, **kwargs):
+        return await self._callback(context.context.event, **kwargs)
+
+
+@register("astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", "0.1.1")
 class CodexOrchestratorPlugin(Star):
     def __init__(self, context: Any, config: Any = None):
         super().__init__(context)
@@ -83,6 +104,7 @@ class CodexOrchestratorPlugin(Star):
                 )
             self.service = Orchestrator(self.store, environments)
             await self.service.recover()
+            self._register_tools()
             for name in environments:
                 watcher = asyncio.create_task(self._watch_environment(name))
                 self._watchers.add(watcher)
@@ -92,6 +114,13 @@ class CodexOrchestratorPlugin(Star):
                 await client.close()
             self.store.close()
             raise
+
+    def _register_tools(self) -> None:
+        tools = []
+        for definition in tool_definitions():
+            callback = getattr(self, definition.pop("callback"))
+            tools.append(_CodexTool(callback=callback, **definition))
+        self.context.add_llm_tools(*tools)
 
     async def _watch_environment(self, name: str) -> None:
         delay = 0.5
@@ -215,12 +244,10 @@ class CodexOrchestratorPlugin(Star):
     async def tool_codex_sessions(self, event: Any, env: str) -> dict[str, Any]:
         return {"sessions": self.service.sessions(env, await self._actor(event))}
 
-    @filter.llm_tool(name="codex_environments")
     async def llm_environments(self, event: AstrMessageEvent):
         """List environments this actor may access."""
         return json.dumps(await self.tool_codex_environments(event), ensure_ascii=False)
 
-    @filter.llm_tool(name="codex_submit")
     async def llm_submit(
         self,
         event: AstrMessageEvent,
@@ -244,7 +271,6 @@ class CodexOrchestratorPlugin(Star):
         result = await self.tool_codex_submit(event, env, workspace, text, mode, thread_id or None)
         return json.dumps(result, ensure_ascii=False, default=str)
 
-    @filter.llm_tool(name="codex_task")
     async def llm_task(
         self,
         event: AstrMessageEvent,
@@ -253,6 +279,7 @@ class CodexOrchestratorPlugin(Star):
         wait_seconds: float = 0,
         cursor: int = 0,
         limit: int = 20,
+        interaction_offset: int = 0,
     ):
         """Read an owned task, optionally waiting briefly for a result and progress page.
 
@@ -262,6 +289,7 @@ class CodexOrchestratorPlugin(Star):
             wait_seconds(number): Wait at most 30 seconds for completion (0 returns immediately)
             cursor(number): Event cursor from the previous task result (default 0)
             limit(number): Maximum progress events in this page (1 to 50)
+            interaction_offset(number): Pending-interaction pagination offset
         """
         result = await self.service.wait_task(
             env,
@@ -270,10 +298,10 @@ class CodexOrchestratorPlugin(Star):
             wait_seconds,
             cursor=cursor,
             limit=limit,
+            interaction_offset=interaction_offset,
         )
         return json.dumps(result, ensure_ascii=False, default=str)
 
-    @filter.llm_tool(name="codex_sessions")
     async def llm_sessions(self, event: AstrMessageEvent, env: str):
         """List owned native Codex sessions.
 
@@ -283,7 +311,6 @@ class CodexOrchestratorPlugin(Star):
         result = self.service.sessions(env, await self._actor(event))
         return json.dumps({"sessions": result}, ensure_ascii=False)
 
-    @filter.llm_tool(name="codex_cancel")
     async def llm_cancel(self, event: AstrMessageEvent, env: str, task_id: str):
         """Request cancellation of an owned task.
 
@@ -294,7 +321,6 @@ class CodexOrchestratorPlugin(Star):
         result = await self.service.act(env, task_id, await self._actor(event), "cancel")
         return json.dumps(result, ensure_ascii=False, default=str)
 
-    @filter.llm_tool(name="codex_steer")
     async def llm_steer(self, event: AstrMessageEvent, env: str, task_id: str, text: str):
         """Add input to the current owned turn.
 
@@ -340,8 +366,21 @@ class CodexOrchestratorPlugin(Star):
                     env, workspace, objective, actor, mode="resume", thread_id=thread_id
                 )
             elif action in {"status", "result"}:
-                env, task_id = rest.split(maxsplit=1)
-                response = self.service.task_view(env, task_id, actor)
+                parts = rest.split()
+                if len(parts) not in {2, 3}:
+                    raise ValueError("expected ENV TASK [OFFSET]")
+                env, task_id = parts[:2]
+                offset = int(parts[2]) if len(parts) == 3 else 0
+                if offset < 0:
+                    raise ValueError("offset must be non-negative")
+                response = self.service.task_view(
+                    env,
+                    task_id,
+                    actor,
+                    interaction_offset=offset if action == "status" else 0,
+                    interaction_limit=1,
+                )
+                return event.plain_result(task_response(response, action, offset))
             elif action == "sessions":
                 response = {"sessions": self.service.sessions(rest.strip(), actor)}
             elif action == "cancel":
@@ -381,14 +420,14 @@ class CodexOrchestratorPlugin(Star):
                 response = {
                     "usage": (
                         "/codex environments | submit ENV WORKSPACE OBJECTIVE | "
-                        "resume ENV WORKSPACE THREAD OBJECTIVE | status ENV TASK | "
-                        "result ENV TASK | sessions ENV | cancel ENV TASK | "
+                        "resume ENV WORKSPACE THREAD OBJECTIVE | status ENV TASK [OFFSET] | "
+                        "result ENV TASK [OFFSET] | sessions ENV | cancel ENV TASK | "
                         "steer ENV TASK TEXT | "
                         "approve ENV TASK INTERACTION [decision] | deny ENV TASK INTERACTION | "
                         "answer ENV TASK INTERACTION JSON"
                     )
                 }
-            text = json.dumps(response, ensure_ascii=False, default=str)[:4000]
+            text = command_response(response)
         except Exception as exc:
-            text = f"Codex request failed: {exc}"
+            text = command_response({"error": str(exc)})
         return event.plain_result(text)
