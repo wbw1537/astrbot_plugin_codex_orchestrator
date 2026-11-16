@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "astrbot-plugin-codex-orchestrator"
+version = "0.1.0"
+description = "AstrBot plugin for authorized Codex App Server task orchestration"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+dependencies = ["aiohttp>=3.9,<4"]
+
+[project.urls]
+Repository = "https://github.com/wbw1537/astrbot_plugin_codex_orchestrator"
+Issues = "https://github.com/wbw1537/astrbot_plugin_codex_orchestrator/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.23,<2", "ruff>=0.8,<1", "build>=1.2,<2", "PyYAML>=6,<7"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["codex_orchestrator"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
