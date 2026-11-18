@@ -796,8 +796,8 @@ class Orchestrator:
         )
         pending = self.store.db.execute(
             "SELECT id,method,params FROM interactions "
-            "WHERE task_id=? AND state='pending' ORDER BY rowid",
-            (task_id,),
+            "WHERE task_id=? AND generation=? AND state='pending' ORDER BY rowid",
+            (task_id, self.environments[env_name].generation),
         ).fetchall()
         view["interactions"] = []
         end = interaction_offset + interaction_limit
@@ -865,15 +865,22 @@ class Orchestrator:
             task = self.store.task(task_id)
             if not task or task["status"] in terminal:
                 break
+            pending = self.store.db.execute(
+                "SELECT 1 FROM interactions WHERE task_id=? AND generation=? AND state='pending' "
+                "LIMIT 1",
+                (task_id, self.environments[env_name].generation),
+            ).fetchone()
+            if pending:
+                break
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 break
             waiter = self._completion.get(task_id)
             if waiter:
                 try:
-                    await asyncio.wait_for(asyncio.shield(waiter), remaining)
+                    await asyncio.wait_for(asyncio.shield(waiter), min(0.25, remaining))
                 except asyncio.TimeoutError:
-                    break
+                    pass
             else:
                 await asyncio.sleep(min(0.05, remaining))
         return self.task_view(

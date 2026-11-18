@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Community preview **0.1.2** lets an AstrBot Agent delegate tasks to the native
+Community preview **0.1.3** lets an AstrBot Agent delegate tasks to the native
 Codex App Server in a configured execution environment. Codex owns execution,
 instructions, skills, MCP and sandbox policy. The plugin does not bundle Codex
 CLI or move its upstream model credentials into AstrBot.
@@ -102,6 +102,7 @@ This is **not** AstrBot's main `cmd_config.json`. Replace addresses and paths:
   "database": "data/plugin_data/astrbot_plugin_codex_orchestrator/codex-orchestrator.sqlite3",
   "environments": [{
     "name": "dev",
+    "host_label": "devbox",
     "transport": "websocket",
     "url": "ws://192.168.10.20:14550",
     "private_ws_opt_in": true,
@@ -119,6 +120,10 @@ Empty ACL lists permit AstrBot administrators only. Ordinary-user entries must
 match the full actor key `platform_id:UMO:user_id` exactly; UMO itself contains
 separators. Do not allow a whole group using UMO alone. Keep admin-only access
 for the first test. Every task/result still belongs to its original actor/cid.
+
+`host_label` is an optional, non-secret label for the machine running Codex.
+The Agent tools include it and the transport in `execution`. Workspace aliases
+select project working directories on the Codex side.
 
 ### Docker placement
 
@@ -176,7 +181,13 @@ In an administrator conversation that already has an AstrBot conversation:
 Or ask the Agent to use `codex_environments`, `codex_submit`, then
 `codex_task(env="dev", task_id="...", wait_seconds=30)`. Explicit schemas declare
 required arguments, integer cursors and wait/page limits. Other tools are
-`codex_sessions`, `codex_steer` and `codex_cancel`; none can approve for a human.
+`codex_sessions`, `codex_steer` and `codex_cancel`. When a pending interaction
+appears, `codex_task` returns early. It gives the Agent the approval or answer
+command and any answer format to relay to the original user. The task stays
+active while the user decides. After responding, the user can run the returned
+status command or send a new message asking the Agent to check. If
+`codex_cancel` returns `cancelling`, `codex_task` reports when the task reaches
+`interrupted`.
 
 `status` shows one pending interaction per page, ahead of verbose progress.
 `result` pages the final text. Follow the returned `nextStatusCommand` or

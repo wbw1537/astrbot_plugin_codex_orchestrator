@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-社区预览版 **0.1.2**。让 AstrBot Agent 将任务交给指定环境中的原生 Codex
+社区预览版 **0.1.3**。让 AstrBot Agent 将任务交给指定环境中的原生 Codex
 App Server 执行。指令、技能、MCP、沙箱及上游登录仍由执行主机上的 Codex 负责；
 插件不包含 CLI，也不把 Codex 的上游模型凭据搬到 AstrBot。
 
@@ -90,6 +90,7 @@ data/config/astrbot_plugin_codex_orchestrator_config.json
   "database": "data/plugin_data/astrbot_plugin_codex_orchestrator/codex-orchestrator.sqlite3",
   "environments": [{
     "name": "dev",
+    "host_label": "devbox",
     "transport": "websocket",
     "url": "ws://192.168.10.20:14550",
     "private_ws_opt_in": true,
@@ -106,6 +107,9 @@ data/config/astrbot_plugin_codex_orchestrator_config.json
 空白名单仅允许 AstrBot 管理员。普通用户条目必须精确匹配完整 actor key：
 `platform_id:UMO:user_id`，其中 UMO 本身含分隔符。不要只用群聊 UMO 放行整群。
 首次试用建议保持管理员默认配置；任务和结果仍绑定原用户及 conversation ID。
+
+`host_label` 是可选的 Codex 执行主机标签，填写可在对话里显示的名称。Agent 工具在
+`execution` 中提供连接方式和该标签。工作区别名用于选择 Codex 执行任务的项目目录。
 
 ### Docker 路径关系
 
@@ -158,7 +162,10 @@ SQLite 数据库，再更新配置。仅修改路径会创建空的任务库。
 也可以让 Agent 依次调用 `codex_environments`、`codex_submit`、
 `codex_task(env="dev", task_id="...", wait_seconds=30)`。工具通过显式 schema 声明
 必填参数、整数游标和等待/分页限制。另有 `codex_sessions`、`codex_steer`、
-`codex_cancel`；这些工具不能替用户审批。
+`codex_cancel`。出现待处理交互时，`codex_task` 会提前返回，给出审批或回答命令及所需格式，
+提示 Agent 转告原用户并保留任务。用户处理后，可以发送回包给出的状态查询命令，或另发消息
+让 Agent 查询。`codex_cancel` 返回 `cancelling` 时，请用 `codex_task` 查到
+`interrupted` 后再确认任务已取消。
 
 `status` 每页显示一项待处理交互，审批信息优先于冗长进度。
 `result` 分页显示最终文本。按响应中的 `nextStatusCommand` 或

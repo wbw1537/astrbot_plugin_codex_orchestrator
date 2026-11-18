@@ -207,6 +207,9 @@ async def test_registered_tools_are_agent_results_with_no_identity_arguments(loa
         task_schema = context.tools["codex_task"].parameters
         assert task_schema["properties"]["cursor"]["type"] == "integer"
         assert "wait_seconds" not in task_schema["required"]
+        assert "/codex approve" in context.tools["codex_task"].description
+        assert "/codex answer" in context.tools["codex_task"].description
+        assert "keep the task active" in context.tools["codex_cancel"].description
         # Exercise the same ContextWrapper -> event path the real tool executor uses.
         wrapper = types.SimpleNamespace(context=types.SimpleNamespace(event=Event()))
         value = await context.tools["codex_environments"].call(wrapper)
@@ -337,8 +340,8 @@ async def chat_task(loaded, tmp_path):
     owner = await plugin._actor(event)
 
     class Client:
-        def handlers(self, **_):
-            pass
+        def handlers(self, *, notification, request):
+            self.server_request = request
 
         async def close(self):
             pass
@@ -381,6 +384,221 @@ def pending_request(store, task_id, number):
         ),
     )
     return interaction
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config,expected",
+    [
+        (
+            {
+                "url": "wss://example.invalid/codex",
+                "token_file": "/private/codex.token",
+                "host_label": "fedora-dev",
+            },
+            {"transport": "websocket", "configuredHost": "fedora-dev"},
+        ),
+        ({"transport": "stdio", "command": ["codex", "app-server"]}, {"transport": "stdio"}),
+    ],
+)
+async def test_agent_tools_report_backend_separately_from_workspace(
+    chat_task, monkeypatch, config, expected
+):
+    plugin, event, _, task_id = chat_task
+    plugin._environment_configs["dev"] = config
+    plugin._register_tools()
+    tools = plugin.context.tools
+    wrapper = types.SimpleNamespace(context=types.SimpleNamespace(event=event))
+    execution = {"backend": "Codex App Server", **expected}
+    environments = json.loads(await tools["codex_environments"].call(wrapper))
+    environment = environments["environments"][0]
+    assert environment["execution"] == execution
+    assert environment["workspaces"] == ["repo"]
+    assert environment["transport"] == "connected"
+    assert "project working directory" in tools["codex_submit"].description
+
+    async def submit(*args, **kwargs):
+        return {"env": "dev", "workspace": "repo", "id": task_id, "status": "submitted"}
+
+    monkeypatch.setattr(plugin.service, "submit", submit)
+    receipt = json.loads(
+        await tools["codex_submit"].call(wrapper, env="dev", workspace="repo", text="check")
+    )
+    view = json.loads(await tools["codex_task"].call(wrapper, env="dev", task_id=receipt["id"]))
+    for result in (receipt, view):
+        assert result["execution"] == execution
+        assert result["workspace"] == "repo"
+    for metadata in (*environments["environments"], receipt, view):
+        assert not {"url", "token_file", "command"} & metadata["execution"].keys()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval", "offered", "actions", "reply"),
+    [
+        (
+            "commandExecution",
+            ["accept", "acceptForSession", "decline", "cancel"],
+            {
+                "accept": "approve",
+                "acceptForSession": "approve acceptForSession",
+                "decline": "deny",
+                "cancel": "deny cancel",
+            },
+            {"decision": "accept"},
+        ),
+        ("fileChange", ["decline"], {"decline": "deny"}, {"decision": "decline"}),
+        (
+            "permissions",
+            None,
+            {"decline": "deny"},
+            {
+                "permissions": {"fileSystem": {"entries": []}, "network": {"enabled": False}},
+                "scope": "turn",
+            },
+        ),
+    ],
+)
+async def test_agent_relays_live_approval_to_original_user(
+    chat_task, approval, offered, actions, reply
+):
+    plugin, event, store, task_id = chat_task
+    plugin._register_tools()
+    store.update(task_id, status="running", thread_id="thread-1", turn_id="turn-1")
+    service = plugin.service
+    service._listeners["dev", "thread-1"] = task_id
+    service._completion[task_id] = asyncio.get_running_loop().create_future()
+    client = service.environments["dev"].client
+    tool = plugin.context.tools["codex_task"]
+    wrapper = types.SimpleNamespace(context=types.SimpleNamespace(event=event))
+    task_view = asyncio.create_task(tool.call(wrapper, env="dev", task_id=task_id, wait_seconds=30))
+    await asyncio.sleep(0)
+    params = {"threadId": "thread-1", "turnId": "turn-1", "command": "pwd"}
+    if offered is not None:
+        params["availableDecisions"] = offered
+    request = asyncio.create_task(client.server_request(f"item/{approval}/requestApproval", params))
+    try:
+        view = json.loads(await asyncio.wait_for(task_view, timeout=2))
+        assert "Keep the task active" in view["approvalInstructions"]
+        assert view["statusCommand"] == f"/codex status dev {task_id}"
+        assert "new message" in view["followUpInstructions"]
+        interaction = view["interactions"][0]
+        target = f"dev {task_id} {interaction['id']}"
+        expected = {}
+        for decision, action in actions.items():
+            command, _, option = action.partition(" ")
+            expected[decision] = f"/codex {command} {target} {option}".rstrip()
+        assert interaction["decisionCommands"] == expected
+        assert not request.done()
+        decision = "accept" if "accept" in expected else "decline"
+        event.get_message_str = lambda: interaction["decisionCommands"][decision]
+        response = json.loads((await plugin.codex_command(event)).text)
+        assert response["status"] == "running"
+        assert await asyncio.wait_for(request, timeout=2) == reply
+        updated = json.loads(await tool.call(wrapper, env="dev", task_id=task_id))
+        assert updated["interactions"] == []
+        assert "approvalInstructions" not in updated
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,params,answer,reply",
+    [
+        (
+            "item/tool/requestUserInput",
+            {"questions": [{"id": "scope", "question": "Which scope?"}]},
+            {"answers": {"scope": ["workspace"]}},
+            {"answers": {"scope": {"answers": ["workspace"]}}},
+        ),
+        (
+            "mcpServer/elicitation/request",
+            {
+                "mode": "form",
+                "requestedSchema": {
+                    "properties": {"scope": {"type": "string"}},
+                    "required": ["scope"],
+                },
+            },
+            {"action": "accept", "content": {"scope": "workspace"}},
+            {"action": "accept", "content": {"scope": "workspace"}},
+        ),
+        (
+            "mcpServer/elicitation/request",
+            {"mode": "form", "requestedSchema": None},
+            None,
+            {"action": "decline"},
+        ),
+    ],
+)
+async def test_agent_relays_answer_format_to_original_user(
+    chat_task, method, params, answer, reply
+):
+    plugin, event, store, task_id = chat_task
+    store.update(task_id, status="running", thread_id="thread-1", turn_id="turn-1")
+    service = plugin.service
+    service._listeners["dev", "thread-1"] = task_id
+    client = service.environments["dev"].client
+    request = asyncio.create_task(
+        client.server_request(method, {**params, "threadId": "thread-1", "turnId": "turn-1"})
+    )
+    try:
+        view = json.loads(
+            await asyncio.wait_for(plugin.llm_task(event, "dev", task_id, wait_seconds=30), 2)
+        )
+        assert "Keep the task active" in view["answerInstructions"]
+        assert view["statusCommand"] == f"/codex status dev {task_id}"
+        assert "new message" in view["followUpInstructions"]
+        interaction = view["interactions"][0]
+        target = f"dev {task_id} {interaction['id']}"
+        if answer is None:
+            assert "answerCommand" not in interaction
+            command = interaction["declineCommand"]
+            assert command == f"/codex deny {target}"
+        else:
+            assert set(interaction["answerFormat"]) == set(answer)
+            assert interaction["answerCommand"] == f"/codex answer {target}"
+            command = f"{interaction['answerCommand']} {json.dumps(answer)}"
+        event.get_message_str = lambda: command
+        response = json.loads((await plugin.codex_command(event)).text)
+        assert response["status"] == "running"
+        assert await asyncio.wait_for(request, 2) == reply
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_cancel_distinguishes_request_from_terminal_state(chat_task, monkeypatch):
+    plugin, event, store, task_id = chat_task
+    store.update(task_id, status="running", thread_id="thread-1", turn_id="turn-1")
+    service = plugin.service
+    service._listeners["dev", "thread-1"] = task_id
+    env = service.environments["dev"]
+
+    async def request(method, params, **kwargs):
+        assert method == "turn/interrupt"
+        return {}
+
+    monkeypatch.setattr(env.client, "request", request, raising=False)
+    cancelled = json.loads(await plugin.llm_cancel(event, "dev", task_id))
+    assert cancelled["status"] == "cancelling"
+    assert "codex_task" in cancelled["cancelInstructions"]
+    await service._notification(
+        env,
+        "turn/completed",
+        {
+            "threadId": "thread-1",
+            "turn": {
+                "id": "turn-1",
+                "status": "interrupted",
+            },
+        },
+    )
+    view = json.loads(await plugin.llm_task(event, "dev", task_id))
+    assert view["status"] == "interrupted"
 
 
 @pytest.mark.asyncio

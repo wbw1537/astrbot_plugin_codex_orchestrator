@@ -66,11 +66,12 @@ class _CodexTool(FunctionTool):
         return await self._callback(context.context.event, **kwargs)
 
 
-@register("astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", "0.1.2")
+@register("astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", "0.1.3")
 class CodexOrchestratorPlugin(Star):
     def __init__(self, context: Any, config: Any = None):
         super().__init__(context)
         self.config = config if isinstance(config, dict) else {}
+        self._environment_configs: dict[str, dict[str, Any]] = {}
 
     async def initialize(self) -> None:
         cfg = self.config if isinstance(self.config, dict) else {}
@@ -81,7 +82,7 @@ class CodexOrchestratorPlugin(Star):
             )
         )
         self.clients = []
-        self._environment_configs = {}
+        self._environment_configs.clear()
         self._stopping = False
         self._watchers = set()
         environments = {}
@@ -202,6 +203,16 @@ class CodexOrchestratorPlugin(Star):
             )
         return Actor(platform, umo, user, cid, role)
 
+    def _execution(self, env: str) -> dict[str, str]:
+        execution = {"backend": "Codex App Server"}
+        config = self._environment_configs.get(env)
+        if config is not None:
+            execution["transport"] = "stdio" if config.get("transport") == "stdio" else "websocket"
+            host_label = config.get("host_label")
+            if isinstance(host_label, str) and host_label.strip():
+                execution["configuredHost"] = host_label.strip()
+        return execution
+
     async def tool_codex_environments(self, event: Any) -> dict[str, Any]:
         actor = await self._actor(event)
         visible = []
@@ -214,6 +225,7 @@ class CodexOrchestratorPlugin(Star):
                         "transport": "connected"
                         if not getattr(env.client, "_closed", asyncio.Event()).is_set()
                         else "disconnected",
+                        "execution": self._execution(name),
                         "capabilities": ["submit", "status", "cancel", "steer", "sessions"],
                     }
                 )
@@ -274,7 +286,9 @@ class CodexOrchestratorPlugin(Star):
             thread_id(string): Owned native thread ID required for resume
         """
         result = await self.tool_codex_submit(event, env, workspace, text, mode, thread_id or None)
-        return json.dumps(result, ensure_ascii=False, default=str)
+        return json.dumps(
+            {"execution": self._execution(env), **result}, ensure_ascii=False, default=str
+        )
 
     async def llm_task(
         self,
@@ -291,7 +305,7 @@ class CodexOrchestratorPlugin(Star):
         Args:
             env(string): Configured environment name
             task_id(string): Task UUID returned by codex_submit
-            wait_seconds(number): Wait at most 30 seconds for completion (0 returns immediately)
+            wait_seconds(number): Wait up to 30 seconds for a result or pending interaction
             cursor(number): Event cursor from the previous task result (default 0)
             limit(number): Maximum progress events in this page (1 to 50)
             interaction_offset(number): Pending-interaction pagination offset
@@ -305,7 +319,84 @@ class CodexOrchestratorPlugin(Star):
             limit=limit,
             interaction_offset=interaction_offset,
         )
-        return json.dumps(result, ensure_ascii=False, default=str)
+        interactions = result["interactions"]
+        if result["status"] not in {
+            "cancelling",
+            "completed",
+            "failed",
+            "interrupted",
+            "reconnecting",
+        }:
+            for interaction in interactions:
+                method = interaction["method"]
+                target = f"{env} {task_id} {interaction['id']}"
+                if method in {
+                    "item/commandExecution/requestApproval",
+                    "item/fileChange/requestApproval",
+                }:
+                    commands = {
+                        "accept": f"/codex approve {target}",
+                        "decline": f"/codex deny {target}",
+                        "cancel": f"/codex deny {target} cancel",
+                    }
+                    if method == "item/commandExecution/requestApproval":
+                        commands["acceptForSession"] = f"/codex approve {target} acceptForSession"
+                    offered = interaction.get("availableDecisions", commands)
+                    interaction["decisionCommands"] = {
+                        decision: commands[decision] for decision in offered
+                    }
+                elif method == "item/permissions/requestApproval":
+                    interaction["decisionCommands"] = {"decline": f"/codex deny {target}"}
+                elif method == "item/tool/requestUserInput":
+                    interaction["answerCommand"] = f"/codex answer {target}"
+                    interaction["answerFormat"] = {"answers": {"QUESTION_ID": ["USER_ANSWER"]}}
+                elif method == "mcpServer/elicitation/request":
+                    interaction["declineCommand"] = f"/codex deny {target}"
+                    params = interaction["params"]
+                    schema = params.get("requestedSchema")
+                    if (
+                        params.get("mode") == "form"
+                        and isinstance(schema, dict)
+                        and isinstance(schema.get("properties"), dict)
+                    ):
+                        interaction["answerCommand"] = f"/codex answer {target}"
+                        interaction["answerFormat"] = {
+                            "action": "accept",
+                            "content": {"FIELD_NAME": "USER_VALUE"},
+                        }
+        guidance = {}
+        if any("decisionCommands" in interaction for interaction in interactions):
+            guidance["approvalInstructions"] = (
+                "Describe each pending approval and give the original user its exact "
+                "decisionCommands to send in this AstrBot conversation. If no approval "
+                "command is listed, tell the user approval is unavailable. Mention any "
+                "truncated details. Keep the task active unless the user asks to cancel it."
+            )
+        if any("answerCommand" in item or "declineCommand" in item for item in interactions):
+            guidance["answerInstructions"] = (
+                "Relay the questions or form and its choices to the original user. Give them "
+                "the answerCommand followed by JSON in the answerFormat to send in this "
+                "AstrBot conversation. Use the actual question IDs or form field names and "
+                "the user's answers. Include every requested question ID or required form "
+                "field. For a form, follow the types in requestedSchema. Mention truncated "
+                "details and relay declineCommand when available. If only declineCommand "
+                "is listed, tell the user the request can be declined here. Keep the task "
+                "active unless the user asks to cancel it."
+            )
+        if guidance:
+            result = {
+                **guidance,
+                "followUpInstructions": (
+                    "Tell the user they can send statusCommand after handling the request, "
+                    "or ask you in a new message to check codex_task."
+                ),
+                "statusCommand": f"/codex status {env} {task_id}",
+                "interactions": interactions,
+                **result,
+            }
+        return json.dumps(
+            {"execution": self._execution(env), **result}, ensure_ascii=False, default=str
+        )
 
     async def llm_sessions(self, event: AstrMessageEvent, env: str):
         """List owned native Codex sessions.
@@ -324,6 +415,11 @@ class CodexOrchestratorPlugin(Star):
             task_id(string): Owned task UUID
         """
         result = await self.service.act(env, task_id, await self._actor(event), "cancel")
+        if result["status"] == "cancelling":
+            result["cancelInstructions"] = (
+                "The interruption was requested. Check codex_task and report the observed "
+                "status. Confirm cancellation once the status is interrupted."
+            )
         return json.dumps(result, ensure_ascii=False, default=str)
 
     async def llm_steer(self, event: AstrMessageEvent, env: str, task_id: str, text: str):
