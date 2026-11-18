@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Community preview **0.1.1** lets an AstrBot Agent delegate tasks to the native
+Community preview **0.1.2** lets an AstrBot Agent delegate tasks to the native
 Codex App Server in a configured execution environment. Codex owns execution,
 instructions, skills, MCP and sandbox policy. The plugin does not bundle Codex
 CLI or move its upstream model credentials into AstrBot.
@@ -99,13 +99,13 @@ This is **not** AstrBot's main `cmd_config.json`. Replace addresses and paths:
 
 ```json
 {
-  "database": "data/codex-orchestrator.sqlite3",
+  "database": "data/plugin_data/astrbot_plugin_codex_orchestrator/codex-orchestrator.sqlite3",
   "environments": [{
     "name": "dev",
     "transport": "websocket",
     "url": "ws://192.168.10.20:14550",
     "private_ws_opt_in": true,
-    "token_file": "/AstrBot/data/codex-orchestrator/server.token",
+    "token_file": "/AstrBot/data/plugin_data/astrbot_plugin_codex_orchestrator/server.token",
     "workspaces": {"repo": "/home/your-user/codex-project"},
     "admins": [],
     "allowlist": [],
@@ -126,14 +126,20 @@ for the first test. Every task/result still belongs to its original actor/cid.
 |---|---|
 | `workspaces.repo` | On the Codex execution host |
 | `token_file` | Inside the AstrBot process/container |
-| `database` | AstrBot working directory; put it in persistent `data` |
+| `database` | AstrBot working directory; use persistent `data/plugin_data/astrbot_plugin_codex_orchestrator/` |
 | stdio `command` | Inside the AstrBot process/container |
 
 For a bind `HOST_DATA:/AstrBot/data`, the example token belongs at
-`HOST_DATA/codex-orchestrator/server.token` on the AstrBot host and appears at
-`/AstrBot/data/codex-orchestrator/server.token` inside the container. Ensure the
+`HOST_DATA/plugin_data/astrbot_plugin_codex_orchestrator/server.token` on the AstrBot host and appears at
+`/AstrBot/data/plugin_data/astrbot_plugin_codex_orchestrator/server.token` inside the container. Ensure the
 AstrBot UID can read it. Do not copy native Codex login files. `127.0.0.1` inside
 the container is not the remote host or the Docker host.
+
+The database parent directory is created automatically on first startup.
+Version 0.1.2 changes the default database location to the plugin-specific data
+directory above. Saved `database` overrides are preserved. For an existing
+installation, stop the plugin and back up/migrate the existing SQLite database
+before updating that setting; changing only the path creates an empty task store.
 
 ### Optional local stdio
 

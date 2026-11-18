@@ -66,7 +66,7 @@ class _CodexTool(FunctionTool):
         return await self._callback(context.context.event, **kwargs)
 
 
-@register("astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", "0.1.1")
+@register("astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", "0.1.2")
 class CodexOrchestratorPlugin(Star):
     def __init__(self, context: Any, config: Any = None):
         super().__init__(context)
@@ -74,7 +74,12 @@ class CodexOrchestratorPlugin(Star):
 
     async def initialize(self) -> None:
         cfg = self.config if isinstance(self.config, dict) else {}
-        self.store = Store(cfg.get("database", "data/codex-orchestrator.sqlite3"))
+        self.store = Store(
+            cfg.get(
+                "database",
+                "data/plugin_data/astrbot_plugin_codex_orchestrator/codex-orchestrator.sqlite3",
+            )
+        )
         self.clients = []
         self._environment_configs = {}
         self._stopping = False

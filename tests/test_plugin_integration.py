@@ -129,6 +129,50 @@ async def test_real_star_constructor_contract_and_cleanup(loaded, tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("use_schema_default", [False, True])
+async def test_default_database_uses_plugin_data_and_persists(
+    loaded, monkeypatch, tmp_path, use_schema_default
+):
+    mod, _, _, _ = loaded
+    monkeypatch.chdir(tmp_path)
+    expected = (
+        tmp_path / "data/plugin_data/astrbot_plugin_codex_orchestrator/codex-orchestrator.sqlite3"
+    )
+    config = {"environments": []}
+    if use_schema_default:
+        schema = json.loads((ROOT / "_conf_schema.json").read_text())
+        config["database"] = schema["database"]["default"]
+    assert not expected.parent.exists()
+    plugin = mod.CodexOrchestratorPlugin(Context(), config)
+    try:
+        await plugin.initialize()
+        assert expected.is_file()
+        assert not (tmp_path / "data/codex-orchestrator.sqlite3").exists()
+        task = plugin.store.create_task(
+            env="test",
+            actor="user",
+            platform="test",
+            umo="test:session",
+            cid="conversation",
+            workspace="repo",
+            text="persist this task",
+            request_key=None,
+        )
+        plugin.store.finish(task["id"], "completed", {"text": "saved"})
+    finally:
+        await plugin.terminate()
+    reopened = mod.CodexOrchestratorPlugin(Context(), config)
+    try:
+        await reopened.initialize()
+        saved = reopened.store.task(task["id"])
+        assert saved["input"] == "persist this task"
+        assert saved["status"] == "completed"
+        assert json.loads(saved["result"]) == {"text": "saved"}
+    finally:
+        await reopened.terminate()
+
+
+@pytest.mark.asyncio
 async def test_registered_tools_are_agent_results_with_no_identity_arguments(loaded, tmp_path):
     mod, _, commands, registration = loaded
     context = Context()

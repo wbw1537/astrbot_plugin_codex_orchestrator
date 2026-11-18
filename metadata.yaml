@@ -2,6 +2,6 @@ name: astrbot_plugin_codex_orchestrator
 display_name: Codex Orchestrator
 desc: Native Codex App Server orchestration for AstrBot
 author: wbw1537
-version: 0.1.1
+version: 0.1.2
 astrbot_version: ">=4.29.4,<5"
 repo: https://github.com/wbw1537/astrbot_plugin_codex_orchestrator

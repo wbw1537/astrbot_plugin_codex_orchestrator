@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-社区预览版 **0.1.1**。让 AstrBot Agent 将任务交给指定环境中的原生 Codex
+社区预览版 **0.1.2**。让 AstrBot Agent 将任务交给指定环境中的原生 Codex
 App Server 执行。指令、技能、MCP、沙箱及上游登录仍由执行主机上的 Codex 负责；
 插件不包含 CLI，也不把 Codex 的上游模型凭据搬到 AstrBot。
 
@@ -87,13 +87,13 @@ data/config/astrbot_plugin_codex_orchestrator_config.json
 
 ```json
 {
-  "database": "data/codex-orchestrator.sqlite3",
+  "database": "data/plugin_data/astrbot_plugin_codex_orchestrator/codex-orchestrator.sqlite3",
   "environments": [{
     "name": "dev",
     "transport": "websocket",
     "url": "ws://192.168.10.20:14550",
     "private_ws_opt_in": true,
-    "token_file": "/AstrBot/data/codex-orchestrator/server.token",
+    "token_file": "/AstrBot/data/plugin_data/astrbot_plugin_codex_orchestrator/server.token",
     "workspaces": {"repo": "/home/your-user/codex-project"},
     "admins": [],
     "allowlist": [],
@@ -113,13 +113,17 @@ data/config/astrbot_plugin_codex_orchestrator_config.json
 |---|---|
 | `workspaces.repo` | Codex 执行主机 |
 | `token_file` | AstrBot 进程/容器内部 |
-| `database` | AstrBot 工作目录，应放在持久化 `data` 中 |
+| `database` | AstrBot 工作目录，应放在持久化 `data/plugin_data/astrbot_plugin_codex_orchestrator/` 中 |
 | stdio 的 `command` | AstrBot 进程/容器内部 |
 
 如果数据挂载为 `HOST_DATA:/AstrBot/data`，上述令牌应放在 AstrBot 宿主机的
-`HOST_DATA/codex-orchestrator/server.token`，容器内对应
-`/AstrBot/data/codex-orchestrator/server.token`。确保 AstrBot 的 UID 可读且权限为 0600。
+`HOST_DATA/plugin_data/astrbot_plugin_codex_orchestrator/server.token`，容器内对应
+`/AstrBot/data/plugin_data/astrbot_plugin_codex_orchestrator/server.token`。确保 AstrBot 的 UID 可读且权限为 0600。
 只复制端点令牌，不复制 Codex 登录文件。容器内的 `127.0.0.1` 不代表宿主机或远程主机。
+
+首次启动时会自动创建数据库的父目录。0.1.2 将默认数据库位置改为上述插件专属
+数据目录。已保存的 `database` 配置会保留；已有安装应先停用插件，备份并迁移原有
+SQLite 数据库，再更新配置。仅修改路径会创建空的任务库。
 
 ### 可选：本地 stdio
 

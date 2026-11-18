@@ -1,4 +1,4 @@
 {
-  "database": {"type":"string", "default":"data/codex-orchestrator.sqlite3", "description":"SQLite task store path"},
+  "database": {"type":"string", "default":"data/plugin_data/astrbot_plugin_codex_orchestrator/codex-orchestrator.sqlite3", "description":"SQLite task store path"},
   "environments": {"type":"list", "default":[], "description":"Admin configured Codex App Server endpoints, workspace aliases, ACL and policy"}
 }
