@@ -10,6 +10,8 @@ import urllib.parse
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from . import __version__
+
 MAX_FRAME = 2 * 1024 * 1024
 MAX_PENDING = 128
 
@@ -159,8 +161,8 @@ class JsonRpcClient:
         value = await self.request(
             "initialize",
             {
-                "clientInfo": {"name": "astrbot-codex-orchestrator", "version": "0.1.0"},
-                "capabilities": {},
+                "clientInfo": {"name": "astrbot-codex-orchestrator", "version": __version__},
+                "capabilities": {"experimentalApi": True},
             },
         )
         await self.notify("initialized", {})

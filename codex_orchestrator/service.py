@@ -17,6 +17,7 @@ MAX_EVENT_BYTES = 4096
 MAX_EVENT_PAGE_BYTES = 65536
 MAX_RESULT_TEXT = 8000
 MAX_EVIDENCE_ITEMS = 8
+APPROVALS_REVIEWERS = ("auto_review", "user")
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,19 @@ class Environment:
     sandbox: str = "workspace-write"
     approval: str = "on-request"
     generation: int = 1
+    approvals_reviewer: str = "auto_review"
+
+    def __post_init__(self) -> None:
+        if self.approvals_reviewer not in APPROVALS_REVIEWERS:
+            raise ValueError("approvals_reviewer must be auto_review or user")
+
+    def thread_policy(self, workspace: str) -> dict[str, str]:
+        return {
+            "cwd": self.workspaces[workspace],
+            "approvalPolicy": self.approval,
+            "approvalsReviewer": self.approvals_reviewer,
+            "sandbox": self.sandbox,
+        }
 
 
 class Orchestrator:
@@ -143,7 +157,14 @@ class Orchestrator:
         job.add_done_callback(self._tasks.discard)
         return self.store.task(task["id"]) or task
 
-    def _effective_policy_matches(self, response: Any, env: Environment, workspace: str) -> bool:
+    def _effective_policy_matches(
+        self,
+        response: Any,
+        env: Environment,
+        workspace: str,
+        *,
+        allow_reviewer_change: bool = False,
+    ) -> bool:
         if not isinstance(response, dict):
             return False
         cwd = env.workspaces[workspace]
@@ -155,9 +176,12 @@ class Orchestrator:
         }.get(env.sandbox)
         if response.get("cwd") != cwd or response.get("approvalPolicy") != env.approval:
             return False
-        if response.get("approvalsReviewer") != "user" or not isinstance(sandbox, dict):
+        reviewer = response.get("approvalsReviewer")
+        if reviewer != env.approvals_reviewer and (
+            not allow_reviewer_change or reviewer not in APPROVALS_REVIEWERS
+        ):
             return False
-        if sandbox.get("type") != expected_type:
+        if not isinstance(sandbox, dict) or sandbox.get("type") != expected_type:
             return False
         roots = sandbox.get("writableRoots")
         if env.sandbox == "workspace-write":
@@ -195,17 +219,26 @@ class Orchestrator:
             try:
                 if mode == "resume":
                     try:
-                        value = await env.client.request(
-                            "thread/resume",
-                            {
-                                "threadId": thread_id,
-                                "cwd": env.workspaces[workspace],
-                                "approvalPolicy": env.approval,
-                                "approvalsReviewer": "user",
-                                "sandbox": env.sandbox,
-                            },
-                            timeout=30,
-                        )
+                        params = {"threadId": thread_id, **env.thread_policy(workspace)}
+                        value = await env.client.request("thread/resume", params, timeout=30)
+                        # App Server can retain the reviewer of an already-loaded thread.
+                        if (
+                            self._effective_policy_matches(
+                                value, env, workspace, allow_reviewer_change=True
+                            )
+                            and value["approvalsReviewer"] != env.approvals_reviewer
+                            and value["thread"]["id"] == thread_id
+                            and value["thread"].get("status", {}).get("type") == "idle"
+                        ):
+                            await env.client.request(
+                                "thread/settings/update",
+                                {
+                                    "threadId": thread_id,
+                                    "approvalsReviewer": env.approvals_reviewer,
+                                },
+                                timeout=30,
+                            )
+                            value = await env.client.request("thread/resume", params, timeout=30)
                     except Exception as exc:
                         self.store.update(
                             task_id, status="failed", error=f"owned thread resume failed: {exc}"
@@ -236,12 +269,7 @@ class Orchestrator:
                     try:
                         value = await env.client.request(
                             "thread/start",
-                            {
-                                "cwd": env.workspaces[workspace],
-                                "approvalPolicy": env.approval,
-                                "approvalsReviewer": "user",
-                                "sandbox": env.sandbox,
-                            },
+                            env.thread_policy(workspace),
                             timeout=30,
                         )
                     except Exception as exc:
@@ -976,10 +1004,7 @@ class Orchestrator:
                     "thread/resume",
                     {
                         "threadId": task["thread_id"],
-                        "cwd": env.workspaces[task["workspace"]],
-                        "approvalPolicy": env.approval,
-                        "approvalsReviewer": "user",
-                        "sandbox": env.sandbox,
+                        **env.thread_policy(task["workspace"]),
                     },
                 )
                 if resumed.get("thread", {}).get("id") != task[

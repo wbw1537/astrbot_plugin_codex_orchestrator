@@ -8,12 +8,14 @@ from dataclasses import dataclass
 from typing import Any
 
 try:  # package-relative loading is AstrBot's normal data.plugins.<name>.main mode
+    from .codex_orchestrator import __version__
     from .codex_orchestrator.chat import command_response, task_response
     from .codex_orchestrator.service import Actor, Environment, Orchestrator
     from .codex_orchestrator.store import Store
     from .codex_orchestrator.tool_schemas import tool_definitions
     from .codex_orchestrator.transport import connect_stdio, connect_websocket
 except ImportError:  # direct module mode for standalone tests
+    from codex_orchestrator import __version__
     from codex_orchestrator.chat import command_response, task_response
     from codex_orchestrator.service import Actor, Environment, Orchestrator
     from codex_orchestrator.store import Store
@@ -66,7 +68,9 @@ class _CodexTool(FunctionTool):
         return await self._callback(context.context.event, **kwargs)
 
 
-@register("astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", "0.1.3")
+@register(
+    "astrbot_plugin_codex_orchestrator", "wbw1537", "Codex App Server orchestration", __version__
+)
 class CodexOrchestratorPlugin(Star):
     def __init__(self, context: Any, config: Any = None):
         super().__init__(context)
@@ -107,6 +111,7 @@ class CodexOrchestratorPlugin(Star):
                     set(row.get("allowlist", [])),
                     row.get("sandbox", "workspace-write"),
                     row.get("approval", "on-request"),
+                    approvals_reviewer=row.get("approvals_reviewer", "auto_review"),
                 )
             self.service = Orchestrator(self.store, environments)
             await self.service.recover()
