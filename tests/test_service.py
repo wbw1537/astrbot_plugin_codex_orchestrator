@@ -21,7 +21,7 @@ class FakeClient:
                 "thread": {"id": params.get("threadId", "th-1")},
                 "cwd": "/work/repo",
                 "approvalPolicy": "on-request",
-                "approvalsReviewer": "user",
+                "approvalsReviewer": params["approvalsReviewer"],
                 "sandbox": {"type": "workspaceWrite", "writableRoots": [], "networkAccess": False},
             }
         if method == "turn/start":
@@ -111,7 +111,7 @@ async def test_hot_reconnect_reuses_active_runner_without_lock_deadlock(setup):
                 },
                 "cwd": "/work/repo",
                 "approvalPolicy": "on-request",
-                "approvalsReviewer": "user",
+                "approvalsReviewer": params["approvalsReviewer"],
                 "sandbox": {"type": "workspaceWrite", "writableRoots": [], "networkAccess": False},
             }
         if method == "thread/turns/list":
@@ -122,7 +122,10 @@ async def test_hot_reconnect_reuses_active_runner_without_lock_deadlock(setup):
     service.mark_disconnected("dev")
     await service.replace_client("dev", replacement)
     await asyncio.wait_for(service.recover("dev"), 0.5)
-    assert any(method == "thread/resume" for method, _ in replacement.calls)
+    resume_params = next(
+        params for method, params in replacement.calls if method == "thread/resume"
+    )
+    assert resume_params["approvalsReviewer"] == "auto_review"
     await replacement.handler["notification"](
         "turn/completed",
         {"threadId": "th-1", "turnId": "tu-1", "turn": {"id": "tu-1", "status": "completed"}},
@@ -153,7 +156,7 @@ async def test_resume_refuses_native_thread_active_in_another_client(setup):
                 "thread": {"id": "th-1", "status": {"type": "active", "activeFlags": []}},
                 "cwd": "/work/repo",
                 "approvalPolicy": "on-request",
-                "approvalsReviewer": "user",
+                "approvalsReviewer": params["approvalsReviewer"],
                 "sandbox": {"type": "workspaceWrite", "writableRoots": [], "networkAccess": False},
             }
         return {"turn": {"id": "unexpected"}}
@@ -248,7 +251,7 @@ async def test_recovery_reserves_workspace_even_when_owner_acl_was_revoked(tmp_p
                 "thread": {"id": "th-1", "status": {"type": "active", "activeFlags": []}},
                 "cwd": "/work/repo",
                 "approvalPolicy": "on-request",
-                "approvalsReviewer": "user",
+                "approvalsReviewer": params["approvalsReviewer"],
                 "sandbox": {"type": "workspaceWrite", "writableRoots": [], "networkAccess": False},
             }
         if method == "thread/turns/list":

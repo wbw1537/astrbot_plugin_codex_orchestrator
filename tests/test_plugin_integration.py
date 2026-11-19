@@ -33,8 +33,8 @@ def loaded(monkeypatch):
 
             return register
 
-    def register(name, author, *args, **kw):
-        registration.update(name=name, author=author)
+    def register(name, author, description, version, **kw):
+        registration.update(name=name, author=author, version=version)
         return lambda cls: cls
 
     for n in ["astrbot", "astrbot.api"]:
@@ -224,13 +224,18 @@ def test_plugin_identity_matches_distribution(loaded):
     mod, tools, commands, registration = loaded
     meta = yaml.safe_load((ROOT / "metadata.yaml").read_text())
     assert registration["name"] == meta["name"], "runtime and package plugin identities differ"
+    assert registration["version"] == meta["version"]
     assert registration["author"] != "OpenAI", "new project incorrectly attributed to OpenAI"
     assert isinstance(json.loads((ROOT / "_conf_schema.json").read_text()), dict)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reviewer_config", "expected_reviewer"),
+    [({}, "auto_review"), ({"approvals_reviewer": "user"}, "user")],
+)
 async def test_transport_disconnect_reconnects_from_saved_admin_config(
-    loaded, monkeypatch, tmp_path
+    loaded, monkeypatch, tmp_path, reviewer_config, expected_reviewer
 ):
     mod, tools, commands, registration = loaded
 
@@ -252,7 +257,7 @@ async def test_transport_disconnect_reconnects_from_saved_admin_config(
                     "thread": {"id": params["threadId"]},
                     "cwd": params["cwd"],
                     "approvalPolicy": "on-request",
-                    "approvalsReviewer": "user",
+                    "approvalsReviewer": params["approvalsReviewer"],
                     "sandbox": {
                         "type": "workspaceWrite",
                         "writableRoots": [],
@@ -285,6 +290,7 @@ async def test_transport_disconnect_reconnects_from_saved_admin_config(
                     "workspaces": {"repo": str(tmp_path)},
                     "admins": [],
                     "allowlist": [],
+                    **reviewer_config,
                 }
             ],
         },
@@ -298,6 +304,7 @@ async def test_transport_disconnect_reconnects_from_saved_admin_config(
         await asyncio.sleep(0.01)
     assert plugin.service.environments["local"].client is not initial
     assert plugin.service.environments["local"].generation == 2
+    assert plugin.service.environments["local"].approvals_reviewer == expected_reviewer
     await plugin.terminate()
 
 

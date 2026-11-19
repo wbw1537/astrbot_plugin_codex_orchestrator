@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-社区预览版 **0.1.3**。让 AstrBot Agent 将任务交给指定环境中的原生 Codex
+社区预览版 **0.1.4**。让 AstrBot Agent 将任务交给指定环境中的原生 Codex
 App Server 执行。指令、技能、MCP、沙箱及上游登录仍由执行主机上的 Codex 负责；
 插件不包含 CLI，也不把 Codex 的上游模型凭据搬到 AstrBot。
 
@@ -13,8 +13,8 @@ App Server 执行。指令、技能、MCP、沙箱及上游登录仍由执行主
   steer、取消和审批均检查原用户、会话以及当前环境权限。
 - SQLite 持久化任务、交互和结果；工作区串行；支持原线程续接、显式 steer，
   返回原生完成状态、计划、diff、用量及命令证据。
-- 支持人工命令/文件审批、非机密问题和受限的 MCP 表单；权限授予、未知和机密
-  交互均保守拒绝，LLM 不能替人审批。
+- 符合条件的申请默认由 Codex 原生自动审查，可按环境切回人工审批。
+  支持非机密问题和受限的 MCP 表单。未知和机密交互均保守拒绝。
 - Codex 向插件推送事件；`codex_task` 可等待最多 30 秒，之后仍可查询持久化结果。
 
 **尚未实现**超时/重启后自动唤回 Agent，以及自动向 IM 发送 outbox 结果。
@@ -99,7 +99,8 @@ data/config/astrbot_plugin_codex_orchestrator_config.json
     "admins": [],
     "allowlist": [],
     "sandbox": "workspace-write",
-    "approval": "on-request"
+    "approval": "on-request",
+    "approvals_reviewer": "auto_review"
   }]
 }
 ```
@@ -110,6 +111,14 @@ data/config/astrbot_plugin_codex_orchestrator_config.json
 
 `host_label` 是可选的 Codex 执行主机标签，填写可在对话里显示的名称。Agent 工具在
 `execution` 中提供连接方式和该标签。工作区别名用于选择 Codex 执行任务的项目目录。
+
+从 0.1.4 起，新建和已有环境省略 `approvals_reviewer` 时都默认使用 `auto_review`。
+使用 Codex App Server 0.169.1 或兼容版本。设置为 `user` 可使用 AstrBot 人工审批。
+环境若允许其他用户提交任务，升级前请核对允许名单。要求人工确认的环境可显式设置 `user`。
+默认的 `workspace-write` 和 `on-request` 策略仍让普通命令在沙箱内执行，默认关闭出站网络。
+需要额外权限时，例如连接内网 SSH，由 Codex 自动审查具体申请，也可能拒绝。
+获准在沙箱外运行的命令可使用执行账户已有的主机权限。切换设置前请等待当前任务结束。
+续接已有的空闲对话时，插件会先核对审批方式，必要时更新后再提交新一轮输入。
 
 ### Docker 路径关系
 
@@ -142,7 +151,8 @@ SQLite 数据库，再更新配置。仅修改路径会创建空的任务库。
   "admins": [],
   "allowlist": [],
   "sandbox": "workspace-write",
-  "approval": "on-request"
+  "approval": "on-request",
+  "approvals_reviewer": "auto_review"
 }
 ```
 
@@ -187,7 +197,7 @@ SQLite 数据库，再更新配置。仅修改路径会创建空的任务库。
 只能选择服务端实际提供的 decision。MCP 表单的回答格式是
 `{"action":"accept","content":{"field":"value"}}`。机密问题留在本地处理。
 详情截断会明确标记：先用 `codex_task` 查看更多信息；无法充分审查时拒绝请求。
-当前预览版拒绝权限授予。取消只是中断请求，须由原生终态确认，也不会回滚已修改文件。
+插件拒绝进入人工交互流程的权限授予申请。取消只是中断请求，须由原生终态确认，也不会回滚已修改文件。
 
 续接：`/codex resume dev repo THREAD_ID OBJECTIVE`；
 追加输入：`/codex steer dev TASK_ID TEXT`；取消：`/codex cancel dev TASK_ID`。

@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Community preview **0.1.3** lets an AstrBot Agent delegate tasks to the native
+Community preview **0.1.4** lets an AstrBot Agent delegate tasks to the native
 Codex App Server in a configured execution environment. Codex owns execution,
 instructions, skills, MCP and sandbox policy. The plugin does not bundle Codex
 CLI or move its upstream model credentials into AstrBot.
@@ -15,8 +15,10 @@ CLI or move its upstream model credentials into AstrBot.
   the original user and conversation as well as current environment permission.
 - Durable SQLite task/interaction/result records, workspace serialization,
   explicit same-thread resume and steer, native completion and command evidence.
-- Manual command/file approvals, non-secret questions and a bounded subset of
-  MCP forms. Permission grants and unsupported/secret interactions fail closed.
+- Native Codex auto-review for eligible approval requests, with manual approval
+  configurable per environment. Non-secret questions and a bounded subset of MCP
+  forms can still reach the original user. Unsupported and secret interactions
+  fail closed.
 - Native progress events are pushed to the plugin. `codex_task` can wait up to
   30 seconds; later results remain available through an explicit query.
 
@@ -29,6 +31,7 @@ plugin checks effective native policy before proceeding.
 
 Verified baseline: **AstrBot 4.29.4, Codex CLI 0.162.1, Python >=3.10**. Other
 AstrBot/Codex versions have not received the same live validation.
+For native auto-review, use Codex App Server 0.169.1 or a compatible version.
 
 ## 1. Prepare the Codex execution host
 
@@ -111,7 +114,8 @@ This is **not** AstrBot's main `cmd_config.json`. Replace addresses and paths:
     "admins": [],
     "allowlist": [],
     "sandbox": "workspace-write",
-    "approval": "on-request"
+    "approval": "on-request",
+    "approvals_reviewer": "auto_review"
   }]
 }
 ```
@@ -124,6 +128,18 @@ for the first test. Every task/result still belongs to its original actor/cid.
 `host_label` is an optional, non-secret label for the machine running Codex.
 The Agent tools include it and the transport in `execution`. Workspace aliases
 select project working directories on the Codex side.
+
+Starting in 0.1.4, an omitted `approvals_reviewer` defaults to `auto_review` on
+both new and saved environments. Set it to `user` to use AstrBot's manual
+approval flow. For environments shared with other users, review the allowlist
+before upgrading or pin `user` if you require manual sign-off.
+With the default `workspace-write` and `on-request` policy, ordinary commands
+stay sandboxed with network access off. Codex evaluates eligible requests for
+specific commands or extra access, such as an SSH command. An approved command
+may run with the execution account's existing host permissions. Auto-review
+can deny a request. Let current tasks finish before changing this setting.
+When an older idle thread is resumed, the plugin can update its reviewer
+before running another turn.
 
 ### Docker placement
 
@@ -160,7 +176,8 @@ replace the environment with:
   "admins": [],
   "allowlist": [],
   "sandbox": "workspace-write",
-  "approval": "on-request"
+  "approval": "on-request",
+  "approvals_reviewer": "auto_review"
 }
 ```
 
@@ -199,7 +216,8 @@ Agent tools retain structured plan/diff/usage/command observations and bounded
 progress; `cursor`/`limit` page events and `interaction_offset` pages interactions.
 Observed command exit codes are evidence, not a claim that a named check passed.
 
-Manual interactions in the original user/conversation:
+Use these commands in the original user/conversation for any interaction
+that the App Server sends to the user:
 
 ```text
 /codex approve dev TASK_ID INTERACTION_ID
@@ -211,9 +229,9 @@ Manual interactions in the original user/conversation:
 Use only a decision actually offered by the server. MCP form answers use
 `{"action":"accept","content":{"field":"value"}}`. Secret questions must be
 handled locally. Truncated details are visibly marked: inspect more through
-`codex_task` and decline if you cannot review enough context. Permission grants
-are declined in this preview. Interrupt is a request; only native terminal
-state confirms cancellation, and it does not roll back files.
+`codex_task` and decline if you cannot review enough context. The plugin declines
+permission grant requests routed to its manual interaction flow. Cancellation
+is confirmed by the native terminal state. It leaves file edits in place.
 
 Resume with `/codex resume dev repo THREAD_ID OBJECTIVE`, steer with
 `/codex steer dev TASK_ID TEXT`, and cancel with `/codex cancel dev TASK_ID`.

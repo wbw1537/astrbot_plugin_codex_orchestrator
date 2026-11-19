@@ -9,7 +9,7 @@ from codex_orchestrator.store import Store
 
 
 class NativeServer:
-    def __init__(self, early=False, broaden=False):
+    def __init__(self, early=False, broaden=False, reviewer_override=None):
         self.calls = []
         self.notify = None
         self.human = None
@@ -17,6 +17,7 @@ class NativeServer:
         self.turn = 0
         self.early = early
         self.broaden = broaden
+        self.reviewer_override = reviewer_override
 
     def handlers(self, *, notification=None, request=None):
         self.notify = notification
@@ -30,7 +31,7 @@ class NativeServer:
                 "thread": {"id": f"thread-{self.thread}", "status": {"type": "idle"}, "turns": []},
                 "cwd": params["cwd"],
                 "approvalPolicy": "on-request",
-                "approvalsReviewer": "user",
+                "approvalsReviewer": self.reviewer_override or params["approvalsReviewer"],
                 "sandbox": {
                     "type": "dangerFullAccess" if self.broaden else "workspaceWrite",
                     "writableRoots": [],
@@ -70,7 +71,7 @@ class NativeServer:
                 "thread": {"id": params["threadId"], "status": {"type": "idle"}, "turns": []},
                 "cwd": params.get("cwd", "/tmp/project"),
                 "approvalPolicy": "on-request",
-                "approvalsReviewer": "user",
+                "approvalsReviewer": self.reviewer_override or params["approvalsReviewer"],
                 "sandbox": {
                     "type": "workspaceWrite",
                     "writableRoots": [],
@@ -87,13 +88,17 @@ class NativeServer:
         pass
 
 
-async def make(tmp_path, **kwargs):
+async def make(tmp_path, *, reviewer="auto_review", **kwargs):
     client = NativeServer(**kwargs)
     store = Store(str(tmp_path / "tasks.sqlite"))
     a = Actor("bot", "bot:GroupMessage:one", "alice", "cid-1")
     b = Actor("bot", "bot:GroupMessage:one", "bob", "cid-1")
     env = Environment(
-        "dev", client, {"repo": "/tmp/project", "other": "/tmp/other"}, allowlist={a.key, b.key}
+        "dev",
+        client,
+        {"repo": "/tmp/project", "other": "/tmp/other"},
+        allowlist={a.key, b.key},
+        approvals_reviewer=reviewer,
     )
     return Orchestrator(store, {"dev": env}), client, store, a, b
 
@@ -163,14 +168,14 @@ async def test_steer_uses_native_steer_not_turn_start(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_broadened_native_sandbox_stops_before_turn(tmp_path):
-    svc, server, store, a, b = await make(tmp_path, broaden=True)
+@pytest.mark.parametrize("policy_drift", [{"broaden": True}, {"reviewer_override": "user"}])
+async def test_native_policy_mismatch_stops_before_turn(tmp_path, policy_drift):
+    svc, server, store, a, b = await make(tmp_path, **policy_drift)
     try:
-        await svc.submit("dev", "repo", "work", a)
+        receipt = await svc.submit("dev", "repo", "work", a)
         await asyncio.sleep(0.02)
-        assert not any(m == "turn/start" for m, p in server.calls), (
-            "broadened sandbox silently accepted"
-        )
+        assert store.task(receipt["id"])["status"] == "failed"
+        assert not any(method == "turn/start" for method, _ in server.calls)
     finally:
         await svc.close()
         store.close()
@@ -401,8 +406,9 @@ async def test_recovery_follows_history_pagination(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_resume_calls_native_resume_before_new_input(tmp_path):
-    svc, server, store, a, b = await make(tmp_path)
+@pytest.mark.parametrize("reviewer", ["auto_review", "user"])
+async def test_resume_calls_native_resume_before_new_input(tmp_path, reviewer):
+    svc, server, store, a, b = await make(tmp_path, reviewer=reviewer)
     try:
         await svc.submit("dev", "repo", "first", a)
         await asyncio.sleep(0.02)
@@ -419,6 +425,60 @@ async def test_resume_calls_native_resume_before_new_input(tmp_path):
             "owned stored session was not loaded/validated before reuse"
         )
         assert calls.index("thread/resume") < calls.index("turn/start")
+        assert [
+            params["approvalsReviewer"]
+            for method, params in server.calls
+            if method in {"thread/start", "thread/resume"}
+        ] == [reviewer, reviewer]
+    finally:
+        await svc.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("update_applied", [True, False])
+async def test_resume_rechecks_the_reviewer_before_starting_a_turn(tmp_path, update_applied):
+    svc, server, store, actor, _ = await make(tmp_path, reviewer="user")
+    try:
+        await svc.submit("dev", "repo", "first", actor)
+        await asyncio.sleep(0.02)
+        await server.notify(
+            "turn/completed",
+            {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}},
+        )
+        client_request = server.request
+
+        async def request(method, params=None, **kwargs):
+            if method == "thread/settings/update":
+                server.calls.append((method, params))
+                if update_applied:
+                    server.reviewer_override = params["approvalsReviewer"]
+                return {}
+            return await client_request(method, params, **kwargs)
+
+        server.reviewer_override = "user"
+        server.request = request
+        svc.environments["dev"].approvals_reviewer = "auto_review"
+        boundary = len(server.calls)
+        receipt = await svc.submit(
+            "dev", "repo", "follow up", actor, mode="resume", thread_id="thread-1"
+        )
+        await asyncio.sleep(0.02)
+        calls = server.calls[boundary:]
+        assert calls[1] == (
+            "thread/settings/update",
+            {"threadId": "thread-1", "approvalsReviewer": "auto_review"},
+        )
+        assert [method for method, _ in calls[:3]] == [
+            "thread/resume",
+            "thread/settings/update",
+            "thread/resume",
+        ]
+        if update_applied:
+            assert calls[3][0] == "turn/start"
+        else:
+            assert len(calls) == 3
+            assert store.task(receipt["id"])["status"] == "failed"
     finally:
         await svc.close()
         store.close()
